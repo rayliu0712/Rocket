@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import hashlib
+import os
 import os.path as op
 import subprocess as sp
 import sys
@@ -8,7 +10,48 @@ from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidget, QProgressBar, QApplication, QLabel, QPushButton
 from adbutils import adb, AdbDevice, ShellReturn
 
-sdcard = '/sdcard/'
+sdcard = '/sdcard/Download/'
+
+
+class U:
+    @staticmethod
+    def sha256(string: str) -> str:
+        return hashlib.sha256(bytes(string, 'utf-8')).hexdigest()
+
+    @staticmethod
+    def safe_name(path: str, checker: Callable[[str], bool]) -> str:
+        pwe, ext = op.splitext(path)
+        n = ''
+        for x in range(1, sys.maxsize):
+            if checker(f'{pwe}{n}{ext}'):
+                n = f' ({x})'
+            else:
+                return f'{pwe}{n}{ext}'
+
+    @staticmethod
+    def local_size(path: str) -> int:
+        if not op.exists(path):
+            return 0
+        if not op.isdir(path):
+            return op.getsize(path)
+
+        size = 0
+        for r, _, fs in os.walk(path):
+            size += sum(op.getsize(op.join(r, f)) for f in fs)
+        return size
+
+    @staticmethod
+    def visual_size(length) -> str:
+        i = 0
+        while length >= 1024:
+            length /= 1024
+            i += 1
+
+        if length - int(length) == 0:
+            length = int(length)
+        else:
+            length = round(length, 2)
+        return f'{length}{['B', 'KB', 'MB', 'GB'][i]}'
 
 
 class Device(AdbDevice):
@@ -71,16 +114,14 @@ class HomeWindow(QWidget):
             d.runas('touch ./files/key_a')
             srcs = sr.output.splitlines()
             total_size = int(srcs.pop(0))
-            dsts = [op.basename(src) for src in srcs]
-            window = TransferWindow(srcs, dsts, total_size, op.getsize, True)
-            window.show()
+            trans.set(srcs, total_size, True)
+            trans.show()
 
     def push_event(self):
         self.close()
-        dsts = [sdcard + name for name in self.names]
-        total_size = sum(op.getsize(src) for src in self.srcs)
-        window = TransferWindow(self.srcs, dsts, total_size, d.get_remote_size, False)
-        window.show()
+        total_size = sum(U.local_size(src) for src in self.srcs)
+        trans.set(self.srcs, total_size, False)
+        trans.show()
 
     def paste(self, a0):
         mime_data = a0.mimeData()
@@ -107,14 +148,18 @@ class HomeWindow(QWidget):
 
 
 class TransferWindow(QWidget):
-    def __init__(self, srcs: List[str], dsts: List[str], total_size: int, get_size: Callable[[str], int],
-                 is_pull: bool):
-        super().__init__()
+    def set(self, srcs: List[str], total_size: int, is_pull: bool):
         self.srcs = srcs
-        self.dsts = dsts
+        self.dsts = []
         self.total_size = total_size
-        self.get_size = get_size
+        self.get_size = op.getsize if is_pull else d.get_remote_size
         self.is_pull = is_pull
+        for src in self.srcs:
+            name = op.basename(src)
+            if self.is_pull:
+                self.dsts.append(U.safe_name(name, op.exists))
+            else:
+                self.dsts.append(U.safe_name(sdcard + name, d.exists))
 
         self.pbar = QProgressBar(self)
         self.pbar.setMaximum(2147483647)
@@ -133,14 +178,20 @@ class TransferWindow(QWidget):
     def transfer(self):
         transferer = d.sync.pull if self.is_pull else lambda x, y: sp.check_output(f'adb push "{x}" "{y}"', shell=True)
         for src, dst in zip(self.srcs, self.dsts):
+            if not self.is_pull:
+                os.chdir(op.dirname(src))
             transferer(src, dst)
         self.timer.stop()
         if self.is_pull:
             d.runas('touch ./files/key_b')
 
 
+cwd = os.getcwd()
 app = QApplication(sys.argv)
 d = Device(adb.device_list()[0])
 home = HomeWindow()
+trans = TransferWindow()
 home.show()
-sys.exit(app.exec())
+status = app.exec()
+os.chdir(cwd)
+sys.exit(status)
