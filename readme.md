@@ -1,8 +1,10 @@
-# Project Launch Rocket
+# Project [Launch](https://github.com/rayliu0712/Launch) [Rocket](https://github.com/rayliu0712/Rocket)
 
-* Launch (client)
-* Rocket (server)
+## Rocket Requirements
 
-```
-pip install PyQt6 adbutils
-```
+* **Python 3.8 +**
+* `PyQt6` `adbutils` modules
+
+    ```
+    pip install PyQt6 adbutils
+    ```

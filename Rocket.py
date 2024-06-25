@@ -2,12 +2,10 @@
 import hashlib
 import os
 import os.path as op
-import shutil
-import subprocess as sp
 import sys
 import time
 from typing import Callable, List
-from PyQt6.QtCore import QThread, QTimer, Qt
+from PyQt6.QtCore import QThread, Qt
 from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidget, QProgressBar, QApplication, QLabel, QPushButton, QVBoxLayout, QSpacerItem, \
     QSizePolicy, QHBoxLayout
@@ -93,16 +91,16 @@ class HomeWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.srcs = []
+        self.occupied = False
         self.resize(400, 300)
         self.setWindowTitle('Rocket')
         self.setAcceptDrops(True)
         self.label = QLabel(self)
-        self.update_label(True)
         self.clear_btn = QPushButton('Clear', self)
         self.clear_btn.clicked.connect(lambda: self.update_label(True))
         self.push_btn = QPushButton('Push', self)
         self.push_btn.clicked.connect(self.push_event)
-        self.push_btn.setEnabled(False)
+        self.update_label(True)
         QShortcut(QKeySequence('Ctrl+V'), self).activated.connect(lambda: self.paste(QApplication.clipboard()))
 
         center_hbox = QHBoxLayout()
@@ -122,31 +120,34 @@ class HomeWindow(QWidget):
         layout.addLayout(bottom_hbox)
         self.setLayout(layout)
 
-        thread = QThread(self)
-        thread.run = self.waiting_for_launch
-        thread.finished.connect(transfer_w.show)
-        thread.start()
+        self.thread = QThread(self)
+        self.thread.run = self.waiting_for_launch
+        self.thread.finished.connect(TransferWindow.new)
+        self.thread.start()
 
     def waiting_for_launch(self):
-        sr = d.runas("cat ./files/launch.txt")
-        while sr.fail:
+        while True:
             sr = d.runas("cat ./files/launch.txt")
-
-        d.runas('touch ./files/key_a')
-        srcs = sr.output.splitlines()
-        total_size = int(srcs.pop(0))
-        transfer_w.set(srcs, total_size, True)
+            if not self.occupied and sr.succeed:
+                self.occupied = True
+                d.runas('touch ./files/key_a')
+                srcs = sr.output.splitlines()
+                total_size = int(srcs.pop(0))
+                TransferWindow.set(srcs, total_size, True)
+                self.thread.finished.emit()
 
     def push_event(self):
+        self.occupied = True
         total_size = sum(U.local_size(src) for src in self.srcs)
-        transfer_w.set(self.srcs, total_size, False)
-        transfer_w.show()
+        TransferWindow.set(self.srcs, total_size, False)
+        TransferWindow.new()
 
     def update_label(self, clear: bool = False):
         if clear:
             self.srcs.clear()
             self.label.setText('Waiting for Launch\n\nor\n\nDrag/Paste files to Push')
             self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.push_btn.setEnabled(False)
         else:
             self.label.setText(f'{len(self.srcs)} File{'s' if len(self.srcs) > 1 else ''}, ' +
                                f'{U.r_size(sum(U.local_size(src) for src in self.srcs))}\n\n' +
@@ -177,22 +178,31 @@ class HomeWindow(QWidget):
 
 
 class TransferWindow(QWidget):
-    def set(self, srcs: List[str], total_size: int, is_pull: bool):
-        self.srcs = srcs
-        self.total_size = total_size
-        self.get_size = U.local_size if is_pull else d.get_remote_size
-        self.get_exist = op.exists if is_pull else d.exists
-        self.is_pull = is_pull
+    srcs: List[str]
+    dsts: List[str]
+    total_size: int
+    get_size: Callable[[str], int]
+    get_exists: Callable[[str], bool]
+    is_pull: bool
 
-        if is_pull:
-            self.dsts = [U.safe_path(op.basename(src), op.exists) for src in srcs]
-        else:
-            self.hd = U.sha256(str(time.time()))
-            os.mkdir(self.hd)
-            self.dsts = [f'/sdcard/Download/{self.hd}']
+    @staticmethod
+    def set(srcs: List[str], total_size: int, is_pull: bool):
+        TransferWindow.srcs = srcs
+        TransferWindow.dsts = [
+            U.safe_path(op.basename(src), op.exists) if is_pull else U.safe_path(sdcard + op.basename(src), d.exists)
+            for src in srcs
+        ]
+        TransferWindow.total_size = total_size
+        TransferWindow.get_size = U.local_size if is_pull else d.get_remote_size
+        TransferWindow.get_exists = op.exists if is_pull else d.exists
+        TransferWindow.is_pull = is_pull
 
-            self.tmps = [op.basename(U.safe_path(f'{sdcard}{op.basename(src)}', d.exists)) for src in srcs]
-            [shutil.move(src, op.join(self.hd, tmp)) for src, tmp in zip(srcs, self.tmps)]
+    @staticmethod
+    def new():
+        home_w.hide()
+        global transfer_w
+        transfer_w = TransferWindow()
+        transfer_w.show()
 
     def show(self):
         self.pbar = QProgressBar(self)
@@ -204,51 +214,58 @@ class TransferWindow(QWidget):
         self.adjustSize()
         self.setLayout(layout)
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_pbar)
+        self.compute_t = QThread(self)
+        self.compute_t.run = self.compute
+        self.compute_t.finished.connect(self.update_ui)
         self.start_time = time.time()
-        self.timer.start(10)
+        self.compute_t.start()
 
-        thread = QThread(self)
-        thread.run = self.transfer
-        thread.finished.connect(self.close)
-        thread.start()
+        transfer_t = QThread(self)
+        transfer_t.run = self.transfer
+        transfer_t.finished.connect(self.close)
+        transfer_t.start()
 
         super().show()
 
-    def update_pbar(self):
-        try:
-            count = sum(self.get_exist(dst) for dst in self.dsts)
-            count -= bool(count)
-            size = sum(self.get_size(dst) for dst in self.dsts)
-            value = size * 100 // self.total_size
-            if value == 100:
-                self.timer.stop()
+    def close(self):
+        super().close()
+        home_w.update_label(True)
+        home_w.show()
 
-            self.label.setText(f'{count}/{len(self.dsts)} File{'s' if len(self.dsts) > 1 else ''}  |  ' +
-                               f'{U.r_size(size)}/{U.r_size(self.total_size)}  |  '
-                               f'{U.r_size(size / (time.time() - self.start_time))}/s')
-            self.pbar.setValue(value)
-            self.setWindowTitle(f'{value}%')
+    def compute(self):
+        self.__value = 0
+        while self.__value < 100:
+            self.__count = sum(TransferWindow.get_exists(dst) for dst in TransferWindow.dsts)
+            self.__count -= bool(self.__count)
+            self.__size = sum(TransferWindow.get_size(dst) for dst in TransferWindow.dsts)
+            self.__value = self.__size * 100 // TransferWindow.total_size
+            self.compute_t.finished.emit()
+
+    def update_ui(self):
+        try:
+            self.label.setText(
+                f'{self.__count}/{len(TransferWindow.dsts)} File{'s' if len(TransferWindow.dsts) > 1 else ''}  |  ' +
+                f'{U.r_size(self.__size)}/{U.r_size(TransferWindow.total_size)}  |  '
+                f'{U.r_size(self.__size / (time.time() - self.start_time))}/s')
+            self.pbar.setValue(self.__value)
+            self.setWindowTitle(f'{self.__value}%')
+
         except FileNotFoundError:
             pass
 
     def transfer(self):
-        transferer = d.sync.pull if self.is_pull else lambda x, y: sp.check_output(f'adb push "{x}" "{y}"', shell=True)
-        if self.is_pull:
-            for src, dst in zip(self.srcs, self.dsts):
-                transferer(src, dst)
+        transferer = d.sync.pull if TransferWindow.is_pull else d.sync.push
+        for src, dst in zip(TransferWindow.srcs, TransferWindow.dsts):
+            transferer(src, dst)
+        if TransferWindow.is_pull:
             d.runas('touch ./files/key_b')
-        else:
-            sp.check_output(f'adb push {self.hd} /sdcard/Download/{self.hd}', shell=True)
-            d.sh(f'cd /sdcard/Download/{self.hd}; mv * "{sdcard}"; rmdir ../{self.hd}')
-            [shutil.move(op.join(self.hd, tmp), src) for tmp, src in zip(self.tmps, self.srcs)]
-            os.rmdir(self.hd)
+        time.sleep(1)
+        home_w.occupied = False
 
 
 app = QApplication(sys.argv)
 d = Device(adb.device_list()[0])
-transfer_w = TransferWindow()
+transfer_w: TransferWindow
 home_w = HomeWindow()
 home_w.show()
 sys.exit(app.exec())
