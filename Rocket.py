@@ -4,14 +4,12 @@ import os
 import os.path as op
 import sys
 import time
-from typing import Callable, List
-from PyQt6.QtCore import QThread, Qt
+from typing import Callable, List, Tuple
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidget, QProgressBar, QApplication, QLabel, QPushButton, QVBoxLayout, QSpacerItem, \
     QSizePolicy, QHBoxLayout
 from adbutils import adb, AdbDevice, ShellReturn
-
-sdcard = '/sdcard/Download/'
 
 
 class U:
@@ -20,8 +18,12 @@ class U:
         return hashlib.sha256(bytes(string, 'utf-8')).hexdigest()
 
     @staticmethod
-    def safe_path(path: str, checker: Callable[[str], bool]) -> str:
+    def safe_path(path: str, is_dir: bool, checker: Callable[[str], bool]) -> str:
         pwe, ext = op.splitext(path)
+        if is_dir and ext != '':
+            pwe += ext
+            ext = ''
+
         n = ''
         for x in range(1, sys.maxsize):
             if checker(f'{pwe}{n}{ext}'):
@@ -42,7 +44,7 @@ class U:
         return size
 
     @staticmethod
-    def r_size(length) -> str:
+    def hr_size(length) -> str:
         i = 0
         while length >= 1024:
             length /= 1024
@@ -52,7 +54,28 @@ class U:
             length = int(length)
         else:
             length = round(length, 2)
-        return f'{length}{['B', 'KB', 'MB', 'GB'][i]}'
+        return f'{length}{('B', 'KB', 'MB', 'GB')[i]}'
+
+    @staticmethod
+    def push_dir_essentials(m_src: str, m_dst: str) -> Tuple[str, List[str], List[str]]:
+        path_parent = op.dirname(m_src)
+
+        end_dirs = ''
+        srcs = []
+        dsts = []
+        for r, ds, fs in os.walk(m_src):
+            # relr = op.relpath(r, path_parent)
+            if not ds:
+                end_dirs += f' "{U.unx_delim(op.relpath(r, path_parent))}"'
+            for f in fs:
+                srcs.append(op.join(r, f))
+                dsts.append(U.unx_delim(op.join(m_dst, f)))
+
+        return end_dirs, srcs, dsts
+
+    @staticmethod
+    def unx_delim(path: str) -> str:
+        return path.replace('\\', '/')
 
 
 class Device(AdbDevice):
@@ -71,13 +94,6 @@ class Device(AdbDevice):
     def runas(self, cmd: str) -> __ShResult:
         return self.sh(f'run-as rl.launch {cmd}')
 
-    def pwd(self, cmd: str = '') -> __ShResult:
-        sr = self.sh(f'cd "{sdcard}" && {cmd} {'' if cmd == '' else ';'}pwd')
-        lines = sr.output.splitlines()
-        lines[-1] = lines[-1].replace('//', '/')
-        sr.output = '\n'.join(lines)
-        return sr
-
     def exists(self, path: str) -> bool:
         return self.sh(f'[ -e "{path}" ]').succeed
 
@@ -87,11 +103,16 @@ class Device(AdbDevice):
         return int(output) if output.isdigit() else 0
 
 
-class HomeWindow(QWidget):
+class Worker(QThread):
+    sig = pyqtSignal()
+
+
+class HomeW(QWidget):
     def __init__(self):
         super().__init__()
-        self.srcs = []
-        self.occupied = False
+        self.push_list = []
+        self.should_thread_run = True
+        self.transferring = False
         self.resize(400, 300)
         self.setWindowTitle('Rocket')
         self.setAcceptDrops(True)
@@ -120,38 +141,36 @@ class HomeWindow(QWidget):
         layout.addLayout(bottom_hbox)
         self.setLayout(layout)
 
-        self.thread = QThread(self)
+        self.thread = Worker(self)
         self.thread.run = self.waiting_for_launch
-        self.thread.finished.connect(TransferWindow.new)
+        self.thread.sig.connect(TransferW.new)
         self.thread.start()
 
     def waiting_for_launch(self):
-        while True:
-            sr = d.runas("cat ./files/launch.txt")
-            if not self.occupied and sr.succeed:
-                self.occupied = True
-                d.runas('touch ./files/key_a')
+        while self.should_thread_run:
+            sr = device.runas("cat ./files/launch.txt")
+            if not self.transferring and sr.succeed:
+                self.transferring = True
+                device.runas('touch ./files/key_a')
                 srcs = sr.output.splitlines()
-                total_size = int(srcs.pop(0))
-                TransferWindow.set(srcs, total_size, True)
-                self.thread.finished.emit()
+                TransferW.set(True, srcs)
+                self.thread.sig.emit()
 
     def push_event(self):
-        self.occupied = True
-        total_size = sum(U.local_size(src) for src in self.srcs)
-        TransferWindow.set(self.srcs, total_size, False)
-        TransferWindow.new()
+        self.transferring = True
+        TransferW.set(False, self.push_list)
+        TransferW.new()
 
     def update_label(self, clear: bool = False):
         if clear:
-            self.srcs.clear()
+            self.push_list.clear()
             self.label.setText('Waiting for Launch\n\nor\n\nDrag/Paste files to Push')
             self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.push_btn.setEnabled(False)
         else:
-            self.label.setText(f'{len(self.srcs)} File{'s' if len(self.srcs) > 1 else ''}, ' +
-                               f'{U.r_size(sum(U.local_size(src) for src in self.srcs))}\n\n' +
-                               '\n'.join(op.basename(name) for name in self.srcs))
+            self.label.setText(f'{len(self.push_list)} File{'s' if len(self.push_list) > 1 else ''}, ' +
+                               f'{U.hr_size(sum(U.local_size(src) for src in self.push_list))}\n\n' +
+                               '\n'.join(op.basename(name) for name in self.push_list))
             self.label.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.label.adjustSize()
@@ -164,8 +183,8 @@ class HomeWindow(QWidget):
         self.push_btn.setEnabled(True)
         for url in mime_data.urls():
             url_file = url.toLocalFile()
-            if url_file not in self.srcs:
-                self.srcs.append(url_file)
+            if url_file not in self.push_list:
+                self.push_list.append(url_file)
         self.update_label()
 
     def dragEnterEvent(self, event):
@@ -176,32 +195,46 @@ class HomeWindow(QWidget):
         self.paste(event)
         event.acceptProposedAction()
 
+    def closeEvent(self, event):
+        self.should_thread_run = False
+        self.thread.wait()
+        event.accept()
 
-class TransferWindow(QWidget):
+
+class TransferW(QWidget):
     srcs: List[str]
     dsts: List[str]
+    is_files: List[str]
     total_size: int
     get_size: Callable[[str], int]
     get_exists: Callable[[str], bool]
     is_pull: bool
 
     @staticmethod
-    def set(srcs: List[str], total_size: int, is_pull: bool):
-        TransferWindow.srcs = srcs
-        TransferWindow.dsts = [
-            U.safe_path(op.basename(src), op.exists) if is_pull else U.safe_path(sdcard + op.basename(src), d.exists)
-            for src in srcs
-        ]
-        TransferWindow.total_size = total_size
-        TransferWindow.get_size = U.local_size if is_pull else d.get_remote_size
-        TransferWindow.get_exists = op.exists if is_pull else d.exists
-        TransferWindow.is_pull = is_pull
+    def set(is_pull: bool, srcs: List[str]):
+        if is_pull:
+            TransferW.total_size = int(srcs.pop(0))
+            TransferW.srcs = [src.split('\t')[0] for src in srcs]
+            TransferW.is_files = [src.split('\t')[1] == '1' for src in srcs]
+            TransferW.dsts = [
+                U.safe_path(op.basename(a), b, op.exists) for a, b in zip(TransferW.srcs, TransferW.is_files)
+            ]
+        else:
+            TransferW.total_size = sum(U.local_size(src) for src in srcs)
+            TransferW.srcs = srcs
+            TransferW.is_files = [op.isfile(src) for src in srcs]
+            TransferW.dsts = \
+                [U.safe_path(sdcard + op.basename(src), op.isdir(src), device.exists) for src in srcs]
+
+        TransferW.get_size = U.local_size if is_pull else device.get_remote_size
+        TransferW.get_exists = op.exists if is_pull else device.exists
+        TransferW.is_pull = is_pull
 
     @staticmethod
     def new():
         home_w.hide()
         global transfer_w
-        transfer_w = TransferWindow()
+        transfer_w = TransferW()
         transfer_w.show()
 
     def show(self):
@@ -214,9 +247,9 @@ class TransferWindow(QWidget):
         self.adjustSize()
         self.setLayout(layout)
 
-        self.compute_t = QThread(self)
+        self.compute_t = Worker(self)
         self.compute_t.run = self.compute
-        self.compute_t.finished.connect(self.update_ui)
+        self.compute_t.sig.connect(self.update_ui)
         self.start_time = time.time()
         self.compute_t.start()
 
@@ -235,18 +268,18 @@ class TransferWindow(QWidget):
     def compute(self):
         self.__value = 0
         while self.__value < 100:
-            self.__count = sum(TransferWindow.get_exists(dst) for dst in TransferWindow.dsts)
+            self.__count = sum(TransferW.get_exists(dst) for dst in TransferW.dsts)
             self.__count -= bool(self.__count)
-            self.__size = sum(TransferWindow.get_size(dst) for dst in TransferWindow.dsts)
-            self.__value = self.__size * 100 // TransferWindow.total_size
-            self.compute_t.finished.emit()
+            self.__size = sum(TransferW.get_size(dst) for dst in TransferW.dsts)
+            self.__value = self.__size * 100 // TransferW.total_size
+            self.compute_t.sig.emit()
 
     def update_ui(self):
         try:
             self.label.setText(
-                f'{self.__count}/{len(TransferWindow.dsts)} File{'s' if len(TransferWindow.dsts) > 1 else ''}  |  ' +
-                f'{U.r_size(self.__size)}/{U.r_size(TransferWindow.total_size)}  |  '
-                f'{U.r_size(self.__size / (time.time() - self.start_time))}/s')
+                f'{self.__count}/{len(TransferW.dsts)} File{'s' if len(TransferW.dsts) > 1 else ''}  |  ' +
+                f'{U.hr_size(self.__size)}/{U.hr_size(TransferW.total_size)}  |  '
+                f'{U.hr_size(self.__size / (time.time() - self.start_time))}/s')
             self.pbar.setValue(self.__value)
             self.setWindowTitle(f'{self.__value}%')
 
@@ -254,18 +287,29 @@ class TransferWindow(QWidget):
             pass
 
     def transfer(self):
-        transferer = d.sync.pull if TransferWindow.is_pull else d.sync.push
-        for src, dst in zip(TransferWindow.srcs, TransferWindow.dsts):
-            transferer(src, dst)
-        if TransferWindow.is_pull:
-            d.runas('touch ./files/key_b')
-        time.sleep(1)
-        home_w.occupied = False
+        if TransferW.is_pull:
+            for src, dst in zip(TransferW.srcs, TransferW.dsts):
+                device.sync.pull(src, dst)
+            device.runas('touch ./files/key_b')
+        else:
+            for m_src, m_dst, is_file in zip(TransferW.srcs, TransferW.dsts, TransferW.is_files):
+                if is_file:
+                    device.sync.push(m_src, m_dst)
+                else:
+                    end_dirs, srcs, dsts = U.push_dir_essentials(m_src, m_dst)
+                    device.sh(f'cd "{sdcard}"; mkdir -p {end_dirs}')
+                    for src, dst in zip(srcs, dsts):
+                        device.sync.push(src, dst)
 
+        time.sleep(1)
+        home_w.transferring = False
+
+
+sdcard = '/sdcard/'
+device = Device(adb.device_list()[0])
 
 app = QApplication(sys.argv)
-d = Device(adb.device_list()[0])
-transfer_w: TransferWindow
-home_w = HomeWindow()
+transfer_w: TransferW
+home_w = HomeW()
 home_w.show()
 sys.exit(app.exec())
