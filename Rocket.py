@@ -8,7 +8,7 @@ from typing import Callable, List, Tuple
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtWidgets import QWidget, QProgressBar, QApplication, QLabel, QPushButton, QVBoxLayout, QSpacerItem, \
-    QSizePolicy, QHBoxLayout
+    QSizePolicy, QHBoxLayout, QMessageBox
 from adbutils import adb, AdbDevice, ShellReturn
 
 
@@ -104,24 +104,32 @@ class Device(AdbDevice):
 
 class Worker(QThread):
     sig = pyqtSignal()
+    sig2 = pyqtSignal()
 
 
 class HomeW(QWidget):
     def __init__(self):
         super().__init__()
+        self.resize(400, 300)
+        self.setAcceptDrops(True)
+        self.setWindowTitle('Rocket')
+        QShortcut(QKeySequence('Ctrl+V'), self).activated.connect(lambda: self.paste(QApplication.clipboard()))
         self.push_list = []
         self.should_thread_run = True
         self.transferring = False
-        self.resize(400, 300)
-        self.setWindowTitle('Rocket')
-        self.setAcceptDrops(True)
+
+        self.device_label = QLabel(self)
+        self.update_device_label('None')
         self.label = QLabel(self)
         self.clear_btn = QPushButton('Clear', self)
         self.clear_btn.clicked.connect(lambda: self.update_label(True))
         self.push_btn = QPushButton('Push', self)
         self.push_btn.clicked.connect(self.push_event)
         self.update_label(True)
-        QShortcut(QKeySequence('Ctrl+V'), self).activated.connect(lambda: self.paste(QApplication.clipboard()))
+
+        top_hbox = QHBoxLayout()
+        top_hbox.addWidget(self.device_label)
+        top_hbox.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
 
         center_hbox = QHBoxLayout()
         center_hbox.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
@@ -134,6 +142,7 @@ class HomeW(QWidget):
         bottom_hbox.addWidget(self.push_btn)
 
         layout = QVBoxLayout()
+        layout.addLayout(top_hbox)
         layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         layout.addLayout(center_hbox)
         layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
@@ -142,10 +151,18 @@ class HomeW(QWidget):
 
         self.thread = Worker(self)
         self.thread.run = self.waiting_for_launch
-        self.thread.sig.connect(TransferW.new)
+        self.thread.sig.connect(lambda: self.update_device_label(device.prop.name))
+        self.thread.sig2.connect(TransferW.new)
         self.thread.start()
 
     def waiting_for_launch(self):
+        global device
+        while device is None and self.should_thread_run:
+            device_list = adb.device_list()
+            if device_list:
+                device = Device(device_list[0])
+                self.thread.sig.emit()
+
         while self.should_thread_run:
             sr = device.runas("cat ./files/launch.txt")
             if not self.transferring and sr.succeed:
@@ -153,7 +170,11 @@ class HomeW(QWidget):
                 device.runas('touch ./files/key_a')
                 srcs = sr.output.splitlines()
                 TransferW.set(True, srcs)
-                self.thread.sig.emit()
+                self.thread.sig2.emit()
+
+    def update_device_label(self, text: str):
+        self.device_label.setText('Device : ' + text)
+        self.device_label.adjustSize()
 
     def push_event(self):
         self.transferring = True
@@ -179,7 +200,7 @@ class HomeW(QWidget):
         if not mime_data.hasUrls():
             return
 
-        self.push_btn.setEnabled(True)
+        self.push_btn.setEnabled(device is not None)
         for url in mime_data.urls():
             url_file = url.toLocalFile()
             if url_file not in self.push_list:
@@ -311,7 +332,7 @@ class TransferW(QWidget):
 
 
 sdcard = '/sdcard/Download/'
-device = Device(adb.device_list()[0])
+device: Device | None = None
 
 app = QApplication(sys.argv)
 transfer_w: TransferW
