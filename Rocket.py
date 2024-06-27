@@ -44,7 +44,7 @@ class U:
         return size
 
     @staticmethod
-    def hr_size(length) -> str:
+    def hr_size(length, is_round: bool = False) -> str:
         i = 0
         while length >= 1024:
             length /= 1024
@@ -54,7 +54,7 @@ class U:
             length = int(length)
         else:
             length = round(length, 2)
-        return f'{length}{("B", "KB", "MB", "GB")[i]}'
+        return f'{round(length) if is_round else length}{("B", "KB", "MB", "GB")[i]}'
 
     @staticmethod
     def push_dir_essentials(m_src: str, m_dst: str) -> Tuple[str, List[str], List[str]]:
@@ -279,10 +279,12 @@ class TransferW(QWidget):
 
     def update_ui(self):
         try:
+            now = time.time()
             self.label.setText(
                 f'{self.__count}/{len(TransferW.dsts)} File{"s" if len(TransferW.dsts) > 1 else ""}  |  ' +
-                f'{U.hr_size(self.__size)}/{U.hr_size(TransferW.total_size)}  |  '
-                f'{U.hr_size(self.__size / (time.time() - self.start_time))}/s')
+                f'{round(now - self.start_time)}s  |  ' +
+                f'{U.hr_size(self.__size / (now - self.start_time), True)}/s  |  ' +
+                f'{U.hr_size(self.__size)}/{U.hr_size(TransferW.total_size)}')
             self.pbar.setValue(self.__value)
             self.setWindowTitle(f'{self.__value}%')
 
@@ -308,7 +310,7 @@ class TransferW(QWidget):
         home_w.transferring = False
 
 
-sdcard = '/sdcard/'
+sdcard = '/sdcard/Download/'
 device = Device(adb.device_list()[0])
 
 app = QApplication(sys.argv)
