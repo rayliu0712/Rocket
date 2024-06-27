@@ -54,7 +54,7 @@ class U:
             length = int(length)
         else:
             length = round(length, 2)
-        return f'{length}{('B', 'KB', 'MB', 'GB')[i]}'
+        return f'{length}{("B", "KB", "MB", "GB")[i]}'
 
     @staticmethod
     def push_dir_essentials(m_src: str, m_dst: str) -> Tuple[str, List[str], List[str]]:
@@ -64,7 +64,6 @@ class U:
         srcs = []
         dsts = []
         for r, ds, fs in os.walk(m_src):
-            # relr = op.relpath(r, path_parent)
             if not ds:
                 end_dirs += f' "{U.unx_delim(op.relpath(r, path_parent))}"'
             for f in fs:
@@ -168,7 +167,7 @@ class HomeW(QWidget):
             self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.push_btn.setEnabled(False)
         else:
-            self.label.setText(f'{len(self.push_list)} File{'s' if len(self.push_list) > 1 else ''}, ' +
+            self.label.setText(f'{len(self.push_list)} File{"s" if len(self.push_list) > 1 else ""}, ' +
                                f'{U.hr_size(sum(U.local_size(src) for src in self.push_list))}\n\n' +
                                '\n'.join(op.basename(name) for name in self.push_list))
             self.label.setAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -281,7 +280,7 @@ class TransferW(QWidget):
     def update_ui(self):
         try:
             self.label.setText(
-                f'{self.__count}/{len(TransferW.dsts)} File{'s' if len(TransferW.dsts) > 1 else ''}  |  ' +
+                f'{self.__count}/{len(TransferW.dsts)} File{"s" if len(TransferW.dsts) > 1 else ""}  |  ' +
                 f'{U.hr_size(self.__size)}/{U.hr_size(TransferW.total_size)}  |  '
                 f'{U.hr_size(self.__size / (time.time() - self.start_time))}/s')
             self.pbar.setValue(self.__value)
