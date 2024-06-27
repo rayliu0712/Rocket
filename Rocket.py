@@ -266,12 +266,16 @@ class TransferW(QWidget):
         home_w.show()
 
     def compute(self):
-        self.__value = 0
-        while self.__value < 100:
-            self.__count = sum(TransferW.get_exists(dst) for dst in TransferW.dsts)
-            self.__count -= bool(self.__count)
-            self.__size = sum(TransferW.get_size(dst) for dst in TransferW.dsts)
-            self.__value = self.__size * 100 // TransferW.total_size
+        try:
+            self.__value = 0
+            while self.__value < 100:
+                self.__count = sum(TransferW.get_exists(dst) for dst in TransferW.dsts)
+                self.__count -= bool(self.__count)
+                self.__size = sum(TransferW.get_size(dst) for dst in TransferW.dsts)
+                self.__value = self.__size * 100 // TransferW.total_size
+                self.compute_t.sig.emit()
+
+        except ZeroDivisionError:
             self.compute_t.sig.emit()
 
     def update_ui(self):
