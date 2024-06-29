@@ -2,17 +2,59 @@
 import hashlib
 import os
 import os.path as op
+import re
 import sys
 import time
-from typing import Callable, List, Tuple
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
-from PyQt6.QtGui import QShortcut, QKeySequence
-from PyQt6.QtWidgets import QWidget, QProgressBar, QApplication, QLabel, QPushButton, QVBoxLayout, QSpacerItem, \
-    QSizePolicy, QHBoxLayout, QMessageBox
+from typing import List, Callable, Tuple
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStringListModel
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import QWidget, QComboBox, QCompleter, QApplication, QVBoxLayout, QHBoxLayout, QPushButton, \
+    QListWidget, QLabel, QProgressBar
 from adbutils import adb, AdbDevice, ShellReturn
+
+bookmarks = {
+    'Home': '',
+    'Download': 'Download',
+    'Pictures': 'Pictures',
+    'AstroDX': 'Android/data/com.Reflektone.AstroDX/files/levels'
+}
+
+
+class Worker(QThread):
+    sig = pyqtSignal()
+    sig2 = pyqtSignal()
+
+
+class MyAdbDevice(AdbDevice):
+    class __ShResult:
+        def __init__(self, sr: ShellReturn):
+            self.succeed = sr.returncode == 0
+            self.fail = not self.succeed
+            self.output = sr.output
+
+    def __init__(self, adb_device: AdbDevice):
+        super().__init__(adb, adb_device.serial)
+
+    def sh(self, cmd: str) -> __ShResult:
+        return MyAdbDevice.__ShResult(self.shell2(cmd, rstrip=True))
+
+    def runas(self, cmd: str) -> __ShResult:
+        return self.sh(f'run-as rl.launch {cmd}')
+
+    def exists(self, path: str) -> bool:
+        return self.sh(f'[ -e "{path}" ]').succeed
+
+    def get_remote_size(self, path: str) -> int:
+        output = self.shell(
+            r"find '#' -type f -exec stat -c%s {} \; | awk '{sum += $1} END {print sum}'".replace('#', path))
+        return int(output) if output.isdigit() else 0
 
 
 class U:
+    @staticmethod
+    def delim(path: str) -> str:
+        return re.sub('/+', '/', path.replace('\\', '/'))
+
     @staticmethod
     def sha256(string: str) -> str:
         return hashlib.sha256(bytes(string, 'utf-8')).hexdigest()
@@ -44,7 +86,7 @@ class U:
         return size
 
     @staticmethod
-    def hr_size(length, is_round: bool = False) -> str:
+    def human_readable_size(length, is_round: bool = False) -> str:
         i = 0
         while length >= 1024:
             length /= 1024
@@ -65,93 +107,58 @@ class U:
         dsts = []
         for r, ds, fs in os.walk(m_src):
             if not ds:
-                end_dirs += f' "{U.unx_delim(op.relpath(r, path_parent))}"'
+                end_dirs += f' "{U.delim(op.relpath(r, path_parent))}"'
             for f in fs:
                 srcs.append(op.join(r, f))
-                dsts.append(U.unx_delim(op.join(m_dst, f)))
+                dsts.append(U.delim(op.join(m_dst, f)))
 
         return end_dirs, srcs, dsts
-
-    @staticmethod
-    def unx_delim(path: str) -> str:
-        return path.replace('\\', '/')
-
-
-class Device(AdbDevice):
-    class __ShResult:
-        def __init__(self, sr: ShellReturn):
-            self.succeed = sr.returncode == 0
-            self.fail = not self.succeed
-            self.output = sr.output
-
-    def __init__(self, adb_device: AdbDevice):
-        super().__init__(adb, adb_device.serial)
-
-    def sh(self, cmd: str) -> __ShResult:
-        return Device.__ShResult(self.shell2(cmd, rstrip=True))
-
-    def runas(self, cmd: str) -> __ShResult:
-        return self.sh(f'run-as rl.launch {cmd}')
-
-    def exists(self, path: str) -> bool:
-        return self.sh(f'[ -e "{path}" ]').succeed
-
-    def get_remote_size(self, path: str) -> int:
-        output = self.shell(
-            r"find '#' -type f -exec stat -c%s {} \; | awk '{sum += $1} END {print sum}'".replace('#', path))
-        return int(output) if output.isdigit() else 0
-
-
-class Worker(QThread):
-    sig = pyqtSignal()
-    sig2 = pyqtSignal()
 
 
 class HomeW(QWidget):
     def __init__(self):
         super().__init__()
-        self.resize(400, 300)
         self.setAcceptDrops(True)
         self.setWindowTitle('Rocket')
-        QShortcut(QKeySequence('Ctrl+V'), self).activated.connect(lambda: self.paste(QApplication.clipboard()))
-        self.push_list = []
         self.should_thread_run = True
         self.transferring = False
 
-        self.device_label = QLabel(self)
-        self.update_device_label('None')
-        self.label = QLabel(self)
-        self.clear_btn = QPushButton('Clear', self)
-        self.clear_btn.clicked.connect(lambda: self.update_label(True))
-        self.push_btn = QPushButton('Push', self)
-        self.push_btn.clicked.connect(self.push_event)
-        self.update_label(True)
+        self.label = QLabel('None', self)
+
+        self.previous_btn = QPushButton('←', self)
+        self.previous_btn.setFixedWidth(self.previous_btn.height())
+        self.previous_btn.clicked.connect(lambda: self.cd(internal + '/..'))
+
+        self.combo = QComboBox(self)
+        self.combo.setEditable(True)
+        self.completer = QCompleter(self)
+        self.combo.setCompleter(self.completer)
+
+        self.list_widget = QListWidget(self)
+        self.list_widget.addItem('.')
+        self.list_widget.itemDoubleClicked.connect(lambda item: self.cd(internal + '/' + item.text()))
 
         top_hbox = QHBoxLayout()
-        top_hbox.addWidget(self.device_label)
-        top_hbox.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        top_hbox.addWidget(self.label)
+        top_hbox.addWidget(self.previous_btn)
+        top_hbox.addWidget(self.combo, Qt.AlignmentFlag.AlignCenter)
 
-        center_hbox = QHBoxLayout()
-        center_hbox.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
-        center_hbox.addWidget(self.label)
-        center_hbox.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
-
-        bottom_hbox = QHBoxLayout()
-        bottom_hbox.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
-        bottom_hbox.addWidget(self.clear_btn)
-        bottom_hbox.addWidget(self.push_btn)
+        btn_hbox = QHBoxLayout()
+        for k, v in bookmarks.items():
+            btn = QPushButton(k, self)
+            btn.clicked.connect(lambda _, v_=v: self.cd(internal + '/' + v_))
+            btn_hbox.addWidget(btn)
 
         layout = QVBoxLayout()
         layout.addLayout(top_hbox)
-        layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-        layout.addLayout(center_hbox)
-        layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-        layout.addLayout(bottom_hbox)
+        layout.addLayout(btn_hbox)
+        layout.addWidget(self.list_widget)
         self.setLayout(layout)
+        self.label.setFocus()
 
         self.thread = Worker(self)
         self.thread.run = self.waiting_for_launch
-        self.thread.sig.connect(lambda: self.update_device_label(device.prop.name))
+        self.thread.sig.connect(lambda: self.label.setText(device.prop.name))
         self.thread.sig2.connect(TransferW.new)
         self.thread.start()
 
@@ -160,7 +167,7 @@ class HomeW(QWidget):
         while device is None and self.should_thread_run:
             device_list = adb.device_list()
             if device_list:
-                device = Device(device_list[0])
+                device = MyAdbDevice(device_list[0])
                 self.thread.sig.emit()
 
         while self.should_thread_run:
@@ -172,40 +179,39 @@ class HomeW(QWidget):
                 TransferW.set(True, srcs)
                 self.thread.sig2.emit()
 
-    def update_device_label(self, text: str):
-        self.device_label.setText('Device : ' + text)
-        self.device_label.adjustSize()
+    def cd(self, new_internal: str):
+        sr = device.sh(f'cd "/sdcard/{new_internal}" && pwd')
+        if not sr.output.startswith('/sdcard') or sr.fail:
+            return
 
-    def push_event(self):
-        self.transferring = True
-        TransferW.set(False, self.push_list)
-        TransferW.new()
+        global internal
+        internal = U.delim(re.sub('^/sdcard/*', '', sr.output))
+        ds = [d.lstrip('./') for d in
+              device.shell(f'cd "/sdcard/{internal}";find . -maxdepth 1 -type d ! -name .').splitlines()]
+        fs = [f.lstrip('./') for f in device.shell(f'cd "/sdcard/{internal}";find . -maxdepth 1 -type f').splitlines()]
+        ds_internal = [(internal + '/' + item).lstrip('/') for item in ds]
 
-    def update_label(self, clear: bool = False):
-        if clear:
-            self.push_list.clear()
-            self.label.setText('Waiting for Launch\n\nor\n\nDrag/Paste files to Push')
-            self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.push_btn.setEnabled(False)
-        else:
-            self.label.setText(f'{len(self.push_list)} File{"s" if len(self.push_list) > 1 else ""}, ' +
-                               f'{U.hr_size(sum(U.local_size(src) for src in self.push_list))}\n\n' +
-                               '\n'.join(op.basename(name) for name in self.push_list))
-            self.label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.combo.clear()
+        self.combo.addItems(ds_internal)
+        self.completer.setModel(QStringListModel(ds_internal, self))
+        self.combo.setEditText(internal)
 
-        self.label.adjustSize()
+        self.list_widget.clear()
+        self.list_widget.addItems(ds + fs)
+        for i in range(len(ds)):
+            item = self.list_widget.item(i)
+            item.setBackground(QColor('black'))
+            item.setForeground(QColor('white'))
 
     def paste(self, a0):
         mime_data = a0.mimeData()
-        if not mime_data.hasUrls():
-            return
+        if mime_data.hasUrls():
+            TransferW.set(False, [url.toLocalFile() for url in mime_data.urls()])
+            TransferW.new()
 
-        self.push_btn.setEnabled(device is not None)
-        for url in mime_data.urls():
-            url_file = url.toLocalFile()
-            if url_file not in self.push_list:
-                self.push_list.append(url_file)
-        self.update_label()
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_F2:
+            print('f2')
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -243,8 +249,8 @@ class TransferW(QWidget):
             TransferW.total_size = sum(U.local_size(src) for src in srcs)
             TransferW.srcs = srcs
             TransferW.is_files = [op.isfile(src) for src in srcs]
-            TransferW.dsts = \
-                [U.safe_path(internal + op.basename(src), op.isdir(src), device.exists) for src in srcs]
+            TransferW.dsts = [U.safe_path(f'/sdcard/{internal}/{op.basename(src)}', op.isdir(src), device.exists)
+                              for src in srcs]
 
         TransferW.get_size = U.local_size if is_pull else device.get_remote_size
         TransferW.get_exists = op.exists if is_pull else device.exists
@@ -282,7 +288,7 @@ class TransferW(QWidget):
 
     def close(self):
         super().close()
-        home_w.update_label(True)
+        # home_w.update_label(True)
         home_w.show()
 
     def compute(self):
@@ -304,8 +310,8 @@ class TransferW(QWidget):
             self.label.setText(
                 f'{self.__count}/{len(TransferW.dsts)} File{"s" if len(TransferW.dsts) > 1 else ""}  |  ' +
                 f'{round(now - self.start_time)}s  |  ' +
-                f'{U.hr_size(self.__size / (now - self.start_time), True)}/s  |  ' +
-                f'{U.hr_size(self.__size)}/{U.hr_size(TransferW.total_size)}')
+                f'{U.human_readable_size(self.__size / (now - self.start_time), True)}/s  |  ' +
+                f'{U.human_readable_size(self.__size)}/{U.human_readable_size(TransferW.total_size)}')
             self.pbar.setValue(self.__value)
             self.setWindowTitle(f'{self.__value}%')
 
@@ -323,7 +329,7 @@ class TransferW(QWidget):
                     device.sync.push(m_src, m_dst)
                 else:
                     end_dirs, srcs, dsts = U.push_dir_essentials(m_src, m_dst)
-                    device.sh(f'cd "{internal}"; mkdir -p {end_dirs}')
+                    device.sh(f'cd "/sdcard/{internal}"; mkdir -p {end_dirs}')
                     for src, dst in zip(srcs, dsts):
                         device.sync.push(src, dst)
 
@@ -331,10 +337,9 @@ class TransferW(QWidget):
         home_w.transferring = False
 
 
-internal = '/sdcard/Download/'
-device: Device | None = None
-
 app = QApplication(sys.argv)
+internal = ''
+device: MyAdbDevice | None = None
 transfer_w: TransferW
 home_w = HomeW()
 home_w.show()
