@@ -4,6 +4,7 @@
 
 * **Python 3.10 +**
 * `PyQt6` `adbutils` modules
-    ```
-    pip install PyQt6 adbutils
-    ```
+  
+  ```
+  pip install PyQt6 adbutils
+  ```
