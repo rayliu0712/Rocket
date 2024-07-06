@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fnmatch
 import hashlib
 import os
 import os.path as op
@@ -6,10 +7,10 @@ import re
 import sys
 import time
 from typing import List, Callable, Tuple, Dict
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStringListModel, QEvent
-from PyQt6.QtGui import QColor, QKeySequence, QAction, QCursor
-from PyQt6.QtWidgets import QWidget, QComboBox, QCompleter, QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, QLabel, QProgressBar, QMenu, QMainWindow, \
-	QMessageBox, QLineEdit, QDialog, QListWidgetItem
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStringListModel
+from PyQt6.QtGui import QColor, QKeySequence, QAction
+from PyQt6.QtWidgets import QWidget, QCompleter, QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, QLabel, QProgressBar, QMenu, QMainWindow, \
+	QMessageBox, QLineEdit, QDialog, QListWidgetItem, QCheckBox, QComboBox
 from adbutils import adb, AdbDevice, ShellReturn
 
 
@@ -78,11 +79,11 @@ class MyListWidget(QListWidget):
 		super().keyPressEvent(event)
 
 
-class MyLineEdit(QLineEdit):
+class DynamicModelLineEdit(QLineEdit):
 	def focusOutEvent(self, event):
-		if not home_w.should_remain_focus or not self.hasFocus():
+		if not home_w.navigator_focus or not self.hasFocus():
 			super().focusOutEvent(event)
-		home_w.should_remain_focus = False
+		home_w.navigator_focus = False
 
 	def keyPressEvent(self, event):
 		if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -97,11 +98,14 @@ class HomeW(QMainWindow):
 		self.setWindowTitle('Rocket')
 		self.resize(700, 500)
 		self.should_thread_run = True
-		self.should_remain_focus = False
 		self.enter_explorer = False
 		self.available_actions = []
-		self.navi_comp_ds: List[str] = []
-		self.navi_comp_prepwd: str | None = None
+		self.ds = []
+		self.fs = []
+		self.navigator_prepwd: str | None = None
+		self.navigator_focus = False
+		self.finder_prels = []
+		self.block_find_sig = False
 
 		self.menu_bar = self.menuBar().addMenu('File')
 		MyActions.init(self)
@@ -109,20 +113,36 @@ class HomeW(QMainWindow):
 		self.label = QLabel('None', self)
 		self.back_btn = QPushButton('←', self, shortcut=QKeySequence.StandardKey.Back, clicked=lambda: self.cd(None, '..'))
 		self.back_btn.setFixedWidth(self.back_btn.height())
-		self.list_widget = MyListWidget(self, itemDoubleClicked=lambda item: self.cd(None, item.text()))
-		self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-		self.list_widget.addItem('Enter explorer')
-		self.list_widget.itemSelectionChanged.connect(lambda: MyActions.connect(self))
-		self.navigator = MyLineEdit(self, textChanged=self.navi_comp_slot, editingFinished=lambda: self.cd(self.navigator.text(), ''))
-		self.navi_comp = QCompleter(self)
-		self.navi_comp_model = QStringListModel()
-		self.navi_comp.setModel(self.navi_comp_model)
-		self.navigator.setCompleter(self.navi_comp)
+
+		self.explorer = MyListWidget(self, itemDoubleClicked=lambda item: self.cd(None, item.text()))
+		self.explorer.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+		self.explorer.addItem('Enter explorer')
+		self.explorer.itemSelectionChanged.connect(lambda: MyActions.connect(self))
+
+		self.navigator = DynamicModelLineEdit(self, textChanged=self.navigator_slot, editingFinished=lambda: self.cd(self.navigator.text(), ''))
+		self.navigator_model = QStringListModel()
+		self.navigator.setCompleter(QCompleter(self.navigator_model))
+
+		self.finder = DynamicModelLineEdit(self)
+		self.finder.setPlaceholderText('Search')
+		self.finder_model = QStringListModel()
+		self.finder.setCompleter(QCompleter(self.finder_model))
+		self.filetype_combo = QComboBox(self)
+		self.filetype_combo.addItems(['All', 'Dirs', 'Files'])
+		self.parser_combo = QComboBox(self)
+		self.parser_combo.addItems(['None', 'Wildcard', 'Regex'])
+
+		self.finder.textChanged.connect(self.find)
+		self.filetype_combo.currentIndexChanged.connect(self.find)
+		self.parser_combo.currentIndexChanged.connect(self.find)
 
 		top_hbox = QHBoxLayout()
 		top_hbox.addWidget(self.label)
 		top_hbox.addWidget(self.back_btn)
 		top_hbox.addWidget(self.navigator, 1)
+		top_hbox.addWidget(self.finder)
+		top_hbox.addWidget(self.filetype_combo)
+		top_hbox.addWidget(self.parser_combo)
 
 		btn_hbox = QHBoxLayout()
 		for k, v in bookmarks.items():
@@ -133,7 +153,7 @@ class HomeW(QMainWindow):
 		layout = QVBoxLayout()
 		layout.addLayout(top_hbox)
 		layout.addLayout(btn_hbox)
-		layout.addWidget(self.list_widget)
+		layout.addWidget(self.explorer)
 		central_widget.setLayout(layout)
 		self.setFocus()
 
@@ -143,38 +163,46 @@ class HomeW(QMainWindow):
 		self.thread.sig2.connect(TransferW.new)
 		self.thread.start()
 
-	def waiting_for_launch(self):
-		global device, transferring
-
-		while device is None and self.should_thread_run:
-			device_list = adb.device_list()
-			if device_list:
-				device = MyAdbDevice(device_list[0])
-				self.thread.sig.emit()
-
-		while self.should_thread_run:
-			sr = device.runas("cat ./files/launch.txt")
-			if not transferring and sr.succeed:
-				transferring = True
-				device.runas('touch ./files/key_a')
-				srcs = sr.output.splitlines()
-				TransferW.set('pull', srcs)
-				self.thread.sig2.emit()
-
-	def navi_comp_slot(self, text: str):
+	def navigator_slot(self, text: str):
 		text = U.delim(text)
 		pwd = re.sub(r'[^/]*$', '', text)
-		if pwd == self.navi_comp_prepwd:
+		if device is None or pwd == self.navigator_prepwd:
 			return
 
 		sr = device.sh(f'cd "/sdcard{text}" && find . -maxdepth 1 -type d ! -name . | sort')
 		if sr.succeed:
-			self.navi_comp_ds = [pwd + re.sub(r'^\./', '', d) for d in sr.output.splitlines()]
-			self.navi_comp_prepwd = pwd
+			ds = [pwd + re.sub(r'^\./', '', d) for d in sr.output.splitlines()]
+			self.navigator_prepwd = pwd
 		else:
-			self.navi_comp_ds = []
-		self.navi_comp_model.setStringList(self.navi_comp_ds)
-		self.should_remain_focus = True
+			ds = []
+		self.navigator_model.setStringList(ds)
+		self.navigator_focus = True
+
+	def find(self, *_):
+		if self.block_find_sig:
+			return
+
+		ls = (self.ds + self.fs, self.ds, self.fs)[self.filetype_combo.currentIndex()]
+		pattern = self.finder.text()
+		match (self.parser_combo.currentIndex()):
+			case 0:
+				ls = [string for string in ls if pattern.lower() in string.lower()]
+			case 1:
+				ls = fnmatch.filter(ls, pattern)
+			case 2:
+				try:
+					ls = [string for string in ls if re.search(pattern, string)]
+				except re.error:
+					pass
+
+		if ls != self.finder_prels:
+			self.finder_prels = ls
+			self.explorer.clear()
+			self.explorer.addItems(ls)
+			for i, text in enumerate(ls):
+				if text in self.ds:
+					self.explorer.item(i).setForeground(QColor('white'))
+					self.explorer.item(i).setBackground(QColor('#765341'))
 
 	def cd(self, new_internal: str | None, branch: str):
 		global internal
@@ -194,24 +222,42 @@ class HomeW(QMainWindow):
 			internal = '/' + U.delim(re.sub('^/sdcard/*', '', sr.output))
 			if internal != '/':
 				internal += '/'
-			ds = [re.sub(r'^\./', '', d) for d in device.shell(f'cd "/sdcard{internal}" && find . -maxdepth 1 -type d ! -name . | sort').splitlines()]
-			fs = [re.sub(r'^\./', '', f) for f in device.shell(f'cd "/sdcard{internal}" && find . -maxdepth 1 -type f | sort').splitlines()]
+			self.ds = [re.sub(r'^\./', '', d) for d in device.shell(f'cd "/sdcard{internal}" && find . -maxdepth 1 -type d ! -name . | sort').splitlines()]
+			self.fs = [re.sub(r'^\./', '', f) for f in device.shell(f'cd "/sdcard{internal}" && find . -maxdepth 1 -type f | sort').splitlines()]
 
-			self.list_widget.clear()
-			self.list_widget.addItems(ds + fs)
-			for i in range(len(ds)):
-				item = self.list_widget.item(i)
-				item.setBackground(QColor('#765341'))
-				item.setForeground(QColor('white'))
+			self.block_find_sig = True
+			self.finder.clear()
+			self.filetype_combo.setCurrentIndex(0)
+			self.parser_combo.setCurrentIndex(0)
+			self.block_find_sig = False
+			self.find()
 
-		self.navi_comp_prepwd = None
+		self.navigator_prepwd = None
 		self.navigator.setText(internal)
 
+	def waiting_for_launch(self):
+		global device, transferring
+
+		while device is None and self.should_thread_run:
+			device_list = adb.device_list()
+			if device_list:
+				device = MyAdbDevice(device_list[0])
+				self.thread.sig.emit()
+
+		while self.should_thread_run:
+			sr = device.runas("cat ./files/launch.txt")
+			if not transferring and sr.succeed:
+				transferring = True
+				device.runas('touch ./files/key_a')
+				srcs = sr.output.splitlines()
+				TransferW.set('pull', srcs)
+				self.thread.sig2.emit()
+
 	def selected_texts(self) -> List[str]:
-		return [item.text() for item in self.list_widget.selectedItems()]
+		return [item.text() for item in self.explorer.selectedItems()]
 
 	def contextMenuEvent(self, event):
-		if self.available_actions and self.list_widget.underMouse():
+		if self.available_actions and self.explorer.underMouse():
 			menu = QMenu(self)
 			menu.addActions(self.available_actions)
 			menu.exec(event.globalPos())
@@ -221,7 +267,9 @@ class HomeW(QMainWindow):
 			event.acceptProposedAction()
 
 	def dropEvent(self, event):
+		msgbox = U.calculating_size_msgbox()
 		TransferW.set('push', [url.toLocalFile() for url in event.mimeData().urls()])
+		msgbox.close()
 		TransferW.new()
 		event.acceptProposedAction()
 
@@ -394,15 +442,17 @@ class MyActions:
 
 	@staticmethod
 	def connect(home: HomeW):
-		items = home.list_widget.selectedItems()
 		if not home.enter_explorer:
 			return
-		elif not items:
-			args = 'paste mkdir'
-		elif len(items) == 1:
-			args = f'{"open " if items[0].foreground() == QColor("white") else ""}cut copy delete rename download'
-		else:
-			args = 'cut copy delete download'
+
+		items = home.explorer.selectedItems()
+		match (len(items)):
+			case 0:
+				args = 'paste mkdir'
+			case 1:
+				args = f'{"open " if items[0].text() in home.ds else ""}cut copy delete rename download'
+			case _:
+				args = 'cut copy delete download'
 
 		home.available_actions = [MyActions.actions[arg] for arg in args.split()]
 		for k, action in MyActions.actions.items():
@@ -432,16 +482,16 @@ class MyActions:
 
 	@staticmethod
 	def rename():
-		item = home_w.list_widget.currentItem()
+		item = home_w.explorer.currentItem()
 		original_name = item.text()
-		home_w.list_widget.editItem(item)
+		home_w.explorer.editItem(item)
 
 		def slot(_):
 			device.sh(f'cd "/sdcard{internal}" && mv "{original_name}" "{item.text()}"')
-			home_w.list_widget.itemDelegate().closeEditor.disconnect()
+			home_w.explorer.itemDelegate().closeEditor.disconnect()
 			home_w.cd(None, '')
 
-		home_w.list_widget.itemDelegate().closeEditor.connect(slot)
+		home_w.explorer.itemDelegate().closeEditor.connect(slot)
 
 	@staticmethod
 	def download():
@@ -460,7 +510,9 @@ class MyActions:
 			device.sh(';'.join(f'mv "/sdcard/{file}" "/sdcard/{internal}"' for file in MyActions.internal_clipboard))
 			home_w.cd(None, '')
 		else:
+			msgbox = U.calculating_size_msgbox()
 			TransferW.set(MyActions.paste_mode, ['/sdcard' + file for file in MyActions.internal_clipboard])
+			msgbox.close()
 			TransferW.new()
 
 	@staticmethod
@@ -468,15 +520,15 @@ class MyActions:
 		item = QListWidgetItem()
 		item.setBackground(QColor('#765341'))
 		item.setForeground(QColor('white'))
-		home_w.list_widget.addItem(item)
-		home_w.list_widget.editItem(item)
+		home_w.explorer.addItem(item)
+		home_w.explorer.editItem(item)
 
 		def slot(_):
 			device.sh(f'cd "/sdcard/{internal}" && mkdir "{item.text()}"')
-			home_w.list_widget.itemDelegate().closeEditor.disconnect()
+			home_w.explorer.itemDelegate().closeEditor.disconnect()
 			home_w.cd(None, '')
 
-		home_w.list_widget.itemDelegate().closeEditor.connect(slot)
+		home_w.explorer.itemDelegate().closeEditor.connect(slot)
 
 
 class U:
@@ -529,6 +581,17 @@ class U:
 		if not urls:
 			return False
 		return all(url.isLocalFile() for url in urls)
+
+	@staticmethod
+	def calculating_size_msgbox() -> QMessageBox:
+		msgbox = QMessageBox()
+		msgbox.resize(400, 300)
+		msgbox.setWindowTitle('Rocket')
+		msgbox.setText('計算大小中 . . .')
+		msgbox.setStandardButtons(QMessageBox.StandardButton.NoButton)
+		msgbox.setWindowModality(Qt.WindowModality.ApplicationModal)
+		msgbox.show()
+		return msgbox
 
 
 app = QApplication(sys.argv)

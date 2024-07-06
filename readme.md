@@ -2,9 +2,8 @@
 
 ## Rocket Requirements
 
-* **Python 3.8 +**
+* **Python 3.10 +**
 * `PyQt6` `adbutils` modules
-
     ```
     pip install PyQt6 adbutils
     ```
