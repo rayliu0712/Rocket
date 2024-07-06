@@ -5,43 +5,12 @@ import os.path as op
 import re
 import sys
 import time
-from typing import List, Callable, Tuple
-
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStringListModel
-from PyQt6.QtGui import QColor, QKeySequence, QAction
+from typing import List, Callable, Tuple, Dict
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStringListModel, QEvent
+from PyQt6.QtGui import QColor, QKeySequence, QAction, QCursor
 from PyQt6.QtWidgets import QWidget, QComboBox, QCompleter, QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, QLabel, QProgressBar, QMenu, QMainWindow, \
     QMessageBox, QLineEdit, QDialog, QListWidgetItem
 from adbutils import adb, AdbDevice, ShellReturn
-
-bookmarks = {
-    'Home': '',
-    'Download': 'Download',
-    'Pictures': 'Pictures',
-    'AstroDX': 'Android/data/com.Reflektone.AstroDX/files/levels'
-}
-
-
-class Worker(QThread):
-    sig = pyqtSignal()
-    sig2 = pyqtSignal()
-
-
-class MyListWidget(QListWidget):
-    def editItem(self, item):
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-        super().editItem(item)
-
-    def mousePressEvent(self, event):
-        if self.itemAt(event.pos()) is None:
-            self.clearSelection()
-            self.clearFocus()
-        super().mousePressEvent(event)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            self.clearSelection()
-            self.clearFocus()
-        super().keyPressEvent(event)
 
 
 class MyAdbDevice(AdbDevice):
@@ -69,14 +38,64 @@ class MyAdbDevice(AdbDevice):
         return int(output) if output.isdigit() else 0
 
 
+bookmarks = {
+    'Home': '/',
+    'Download': '/Download/',
+    'Pictures': '/Pictures/',
+    'AstroDX': '/Android/data/com.Reflektone.AstroDX/files/levels/'
+}
+device: MyAdbDevice | None = None
+internal = '/'
+transferring = False
+
+
+class Worker(QThread):
+    sig = pyqtSignal()
+    sig2 = pyqtSignal()
+
+
+class MyListWidget(QListWidget):
+    def editItem(self, item):
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+        super().editItem(item)
+
+    def mousePressEvent(self, event):
+        if self.itemAt(event.pos()) is None:
+            self.clearSelection()
+            self.clearFocus()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.clearSelection()
+            self.clearFocus()
+        super().keyPressEvent(event)
+
+
+class MyLineEdit(QLineEdit):
+    def focusOutEvent(self, event):
+        if not home_w.should_remain_focus or not self.hasFocus():
+            super().focusOutEvent(event)
+        home_w.should_remain_focus = False
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.clearFocus()
+        super().keyPressEvent(event)
+
+
 class HomeW(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
         self.setWindowTitle('Rocket')
+        self.resize(700, 500)
         self.should_thread_run = True
+        self.should_remain_focus = False
         self.enter_explorer = False
         self.available_actions = []
+        self.navi_comp_ds: List[str] = []
+        self.navi_comp_prepwd = ''
 
         self.menu_bar = self.menuBar().addMenu('File')
         MyActions.init(self)
@@ -84,95 +103,104 @@ class HomeW(QMainWindow):
         self.label = QLabel('None', self)
         self.back_btn = QPushButton('←', self, clicked=lambda: self.cd(None, '..'))
         self.back_btn.setFixedWidth(self.back_btn.height())
-        self.next_btn = QPushButton('→', self)
-        self.next_btn.setFixedWidth(self.next_btn.height())
-        self.completer = QCompleter(self)
-        self.combo = QComboBox(self, editable=True)
-        self.combo.setCompleter(self.completer)
-        self.searcher = QLineEdit(self, placeholderText='Search')
         self.list_widget = MyListWidget(self, itemDoubleClicked=lambda item: self.cd(None, item.text()))
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.list_widget.addItem('Double click me to enter explorer')
-        self.list_widget.itemSelectionChanged.connect(MyActions.connect)
+        self.list_widget.itemSelectionChanged.connect(lambda: MyActions.connect(self))
+        self.navigator = MyLineEdit(self, textChanged=self.navi_comp_slot, editingFinished=lambda: self.cd(self.navigator.text(), ''))
+        self.navi_comp = QCompleter(self)
+        self.navi_comp_model = QStringListModel()
+        self.navi_comp.setModel(self.navi_comp_model)
+        self.navigator.setCompleter(self.navi_comp)
 
         top_hbox = QHBoxLayout()
         top_hbox.addWidget(self.label)
         top_hbox.addWidget(self.back_btn)
-        top_hbox.addWidget(self.next_btn)
-        top_hbox.addWidget(self.combo, 1)
-        top_hbox.addWidget(self.searcher, 1)
+        top_hbox.addWidget(self.navigator, 1)
 
         btn_hbox = QHBoxLayout()
         for k, v in bookmarks.items():
-            btn_hbox.addWidget(QPushButton(k, self, clicked=lambda _, v_=v: self.cd(None, v_)))
+            btn_hbox.addWidget(QPushButton(k, self, clicked=lambda _, v_=v: self.cd(v_, '')))
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        layout = QVBoxLayout()
         layout.addLayout(top_hbox)
         layout.addLayout(btn_hbox)
         layout.addWidget(self.list_widget)
-        self.setLayout(layout)
-        self.label.setFocus()
+        central_widget.setLayout(layout)
+        self.setFocus()
 
         self.thread = Worker(self)
         self.thread.run = self.waiting_for_launch
-        self.thread.sig.connect(lambda: self.label.setText(G.device.prop.name))
+        self.thread.sig.connect(lambda: self.label.setText(device.prop.name))
         self.thread.sig2.connect(TransferD.new)
         self.thread.start()
 
     def waiting_for_launch(self):
-        while G.device is None and self.should_thread_run:
+        global device, transferring
+
+        while device is None and self.should_thread_run:
             device_list = adb.device_list()
             if device_list:
-                G.device = MyAdbDevice(device_list[0])
+                device = MyAdbDevice(device_list[0])
                 self.thread.sig.emit()
 
         while self.should_thread_run:
-            sr = G.device.runas("cat ./files/launch.txt")
-            if not G.transferring and sr.succeed:
-                G.transferring = True
-                G.device.runas('touch ./files/key_a')
+            sr = device.runas("cat ./files/launch.txt")
+            if not transferring and sr.succeed:
+                transferring = True
+                device.runas('touch ./files/key_a')
                 srcs = sr.output.splitlines()
-                TransferD.set(True, srcs)
+                TransferD.set('pull', srcs)
                 self.thread.sig2.emit()
 
+    def navi_comp_slot(self, text: str):
+        text = U.delim(text)
+        pwd = re.sub(r'[^/]*$', '', text)
+        if pwd == self.navi_comp_prepwd:
+            return
+
+        sr = device.sh(f'cd "/sdcard{text}" && find . -maxdepth 1 -type d ! -name . | sort')
+        if sr.succeed:
+            self.navi_comp_ds = [pwd + re.sub(r'^\./', '', d) for d in sr.output.splitlines()]
+            self.navi_comp_prepwd = pwd
+        else:
+            self.navi_comp_ds = []
+        self.navi_comp_model.setStringList(self.navi_comp_ds)
+        self.should_remain_focus = True
+
     def cd(self, new_internal: str | None, branch: str):
+        global internal
+        if device is None:
+            return
+
         if new_internal is None:
-            new_internal = G.internal
+            new_internal = internal
 
         if not self.enter_explorer:
             self.enter_explorer = True
             branch = ''
 
-        sr = G.device.sh(f'cd "/sdcard/{new_internal}/{branch}" && pwd')
-        if not sr.output.startswith('/sdcard') or sr.fail:
-            return
+        sr = device.sh(f'cd "/sdcard{new_internal}{branch}" && pwd')
+        if sr.output.startswith('/sdcard') and sr.succeed:
+            internal = '/' + U.delim(re.sub('^/sdcard/*', '', sr.output))
+            if internal != '/':
+                internal += '/'
+            ds = [re.sub(r'^\./', '', d) for d in device.shell(f'cd "/sdcard{internal}" && find . -maxdepth 1 -type d ! -name . | sort').splitlines()]
+            fs = [re.sub(r'^\./', '', f) for f in device.shell(f'cd "/sdcard{internal}" && find . -maxdepth 1 -type f | sort').splitlines()]
 
-        G.internal = G.delim(re.sub('^/sdcard/*', '', sr.output))
-        ds = [d.lstrip('./') for d in G.device.shell(f'cd "/sdcard/{G.internal}";find . -maxdepth 1 -type d ! -name .|sort').splitlines()]
-        fs = [f.lstrip('./') for f in G.device.shell(f'cd "/sdcard/{G.internal}";find . -maxdepth 1 -type f|sort').splitlines()]
-        ds_internal = [G.valid_internal(it) for it in ds]
+            self.list_widget.clear()
+            self.list_widget.addItems(ds + fs)
+            for i in range(len(ds)):
+                item = self.list_widget.item(i)
+                item.setBackground(QColor('#765341'))
+                item.setForeground(QColor('white'))
 
-        self.combo.clear()
-        self.combo.addItems(ds_internal)
-        self.completer.setModel(QStringListModel(ds_internal, self))
-        self.combo.setEditText(G.internal)
-
-        self.list_widget.clear()
-        self.list_widget.addItems(ds + fs)
-        for i in range(len(ds)):
-            item = self.list_widget.item(i)
-            item.setBackground(QColor('#765341'))
-            item.setForeground(QColor('white'))
+        self.navigator.setText(internal)
 
     def selected_texts(self) -> List[str]:
-        return [it.text() for it in self.list_widget.selectedItems()]
-
-    def push(self, a0):
-        if G.are_local_files(a0):
-            TransferD.set(False, [url.toLocalFile() for url in a0.mimeDats().urls()])
-            TransferD.new()
+        return [item.text() for item in self.list_widget.selectedItems()]
 
     def contextMenuEvent(self, event):
         if self.available_actions:
@@ -181,11 +209,12 @@ class HomeW(QMainWindow):
             menu.exec(event.globalPos())
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if U.are_local_files(event):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        self.push(event)
+        TransferD.set('push', [url.toLocalFile() for url in event.mimeData().urls()])
+        TransferD.new()
         event.acceptProposedAction()
 
     def closeEvent(self, event):
@@ -201,30 +230,39 @@ class TransferD(QDialog):
     total_size: int
     get_size: Callable[[str], int]
     get_exists: Callable[[str], bool]
-    is_pull: bool
+    mode: str
 
     @staticmethod
-    def set(is_pull: bool, srcs: List[str]):
-        if is_pull:
+    def set(mode: str, srcs: List[str]):
+        TransferD.mode = mode
+        if mode == 'pull':
             TransferD.total_size = int(srcs.pop(0))
             TransferD.srcs = [src.split('\t')[0] for src in srcs]
             TransferD.is_files = [src.split('\t')[1] == '1' for src in srcs]
-            TransferD.dsts = [G.safe_path(op.basename(a), b, op.exists) for a, b in zip(TransferD.srcs, TransferD.is_files)]
-        else:
-            TransferD.total_size = sum(G.local_size(src) for src in srcs)
+            TransferD.dsts = [U.safe_path(op.basename(a), b, op.exists) for a, b in zip(TransferD.srcs, TransferD.is_files)]
+            TransferD.get_size = U.local_size
+            TransferD.get_exists = op.exists
+        elif mode == 'push':
+            TransferD.total_size = sum(U.local_size(src) for src in srcs)
             TransferD.srcs = srcs
             TransferD.is_files = [op.isfile(src) for src in srcs]
-            TransferD.dsts = [G.safe_path(f'/sdcard/{G.internal}/{op.basename(src)}', op.isdir(src), G.device.exists) for src in srcs]
-
-        TransferD.get_size = G.local_size if is_pull else G.device.get_remote_size
-        TransferD.get_exists = op.exists if is_pull else G.device.exists
-        TransferD.is_pull = is_pull
+            TransferD.dsts = [U.safe_path(f'/sdcard{internal}{op.basename(src)}', op.isdir(src), device.exists) for src in srcs]
+            TransferD.get_size = device.get_remote_size
+            TransferD.get_exists = device.exists
+        else:
+            TransferD.total_size = sum(device.get_remote_size(f'/sdcard{src}') for src in srcs)
+            TransferD.srcs = srcs
+            TransferD.is_files = []
+            TransferD.dsts = [f'/sdcard{internal}{op.basename(src)}' for src in srcs]
+            TransferD.get_size = device.get_remote_size
+            TransferD.get_exists = device.exists
 
     @staticmethod
     def new():
-        G.transfer_w = TransferD(G.home_w)
-        G.transfer_w.setModal(True)
-        G.transfer_w.show()
+        global transfer_w
+        transfer_w = TransferD(home_w)
+        transfer_w.setModal(True)
+        transfer_w.show()
 
     def show(self):
         self.pbar = QProgressBar(self)
@@ -242,8 +280,9 @@ class TransferD(QDialog):
         self.start_time = time.time()
         self.compute_t.start()
 
-        transfer_t = QThread(self)
+        transfer_t = Worker(self)
         transfer_t.run = self.transfer
+        transfer_t.sig.connect(lambda: home_w.cd(None, '') if MyActions.paste_mode == 'push' else ...)
         transfer_t.finished.connect(self.close)
         transfer_t.start()
 
@@ -268,50 +307,59 @@ class TransferD(QDialog):
         self.label.setText(
             f'{self.__count}/{len(TransferD.dsts)} File{"s" if len(TransferD.dsts) > 1 else ""}  |  ' +
             f'{round(now - self.start_time)}s  |  ' +
-            f'{G.human_readable_size(self.__size / (now - self.start_time), True)}/s  |  ' +
-            f'{G.human_readable_size(self.__size)}/{G.human_readable_size(TransferD.total_size)}')
+            f'{U.human_readable_size(self.__size / (now - self.start_time), True)}/s  |  ' +
+            f'{U.human_readable_size(self.__size)}/{U.human_readable_size(TransferD.total_size)}')
         self.pbar.setValue(self.__value)
         self.setWindowTitle(f'{self.__value}%')
 
     def transfer(self):
-        if TransferD.is_pull:
+        if TransferD.mode == 'pull':
             for src, dst in zip(TransferD.srcs, TransferD.dsts):
-                G.device.sync.pull(src, dst)
-            G.device.runas('touch ./files/key_b')
-        else:
+                device.sync.pull(src, dst)
+            device.runas('touch ./files/key_b')
+        elif TransferD.mode == 'push':
             for m_src, m_dst, is_file in zip(TransferD.srcs, TransferD.dsts, TransferD.is_files):
                 if is_file:
-                    G.device.sync.push(m_src, m_dst)
+                    device.sync.push(m_src, m_dst)
                 else:
-                    end_dirs, srcs, dsts = G.push_dir_essentials(m_src, m_dst)
-                    G.device.sh(f'cd "/sdcard/{G.internal}"; mkdir -p {end_dirs}')
+                    end_dirs, srcs, dsts = U.push_dir_essentials(m_src, m_dst)
+                    device.sh(f'cd "/sdcard{internal}" && mkdir -p {end_dirs}')
                     for src, dst in zip(srcs, dsts):
-                        G.device.sync.push(src, dst)
+                        device.sync.push(src, dst)
+        else:
+            device.sh(' && '.join(f'cp -r "/sdcard{src}" "/sdcard{internal}"' for src in TransferD.srcs))
 
         time.sleep(1)
-        G.transferring = False
+        global transferring
+        transferring = False
+
+    def close(self):
+        if TransferD.mode != 'pull' and home_w.enter_explorer:
+            home_w.cd(None, '')
+        super().close()
 
 
 class MyActions:
-    actions = {}
-    home: HomeW | None = None
-    is_cut: bool
-    tmp_clipboard = []
+    actions: Dict[str, QAction] = {}
+    paste_mode: str | None = None
+    internal_clipboard: List[str] = []
 
     @staticmethod
-    def init(home):
-        def run():
-            if [it.toLocalFile() for it in QApplication.clipboard().mimeData().urls()] != MyActions.tmp_clipboard:
-                MyActions.tmp_clipboard.clear()
+    def init(home: HomeW):
+        def slot():
+            if U.are_local_files(clipboard):
+                MyActions.set_paste('push', [url.toLocalFile() for url in clipboard.mimeData().urls()])
+            else:
+                MyActions.set_paste(None, [])
+            MyActions.connect(home)
 
-        QApplication.clipboard().dataChanged.connect(run)
-        MyActions.home = home
+        clipboard.dataChanged.connect(slot)
         separator = QAction()
         separator.setSeparator(True)
         MyActions.actions = {
             'open': QAction('開啟', home, enabled=False, shortcut=QKeySequence.StandardKey.Open, triggered=MyActions.open),
-            'cut': QAction('剪下', home, enabled=False, shortcut=QKeySequence.StandardKey.Cut, triggered=lambda: MyActions.set_clipboard(True)),
-            'copy': QAction('複製', home, enabled=False, shortcut=QKeySequence.StandardKey.Copy, triggered=lambda: MyActions.set_clipboard(False)),
+            'cut': QAction('剪下', home, enabled=False, shortcut=QKeySequence.StandardKey.Cut, triggered=lambda: MyActions.internal_clip('cut')),
+            'copy': QAction('複製', home, enabled=False, shortcut=QKeySequence.StandardKey.Copy, triggered=lambda: MyActions.internal_clip('copy')),
             'delete': QAction('刪除', home, enabled=False, shortcut=QKeySequence.StandardKey.Delete, triggered=MyActions.delete),
             'rename': QAction('重新命名', home, enabled=False, shortcut=Qt.Key.Key_F2, triggered=MyActions.rename),
             '-': separator,
@@ -321,84 +369,85 @@ class MyActions:
         home.menu_bar.addActions(MyActions.actions.values())
 
     @staticmethod
-    def connect():
-        if MyActions.home.enter_explorer:
-            items = G.home_w.list_widget.selectedItems()
-            length = 2 if len(items) > 1 else len(items)
-            foreground = items[0].foreground() if length else None
-            args = (
-                f'{'paste ' if G.are_local_files(QApplication.clipboard()) else ''}mkdir',
-                f'{'open ' if foreground == QColor('white') else ''}cut copy delete rename',
-                'cut copy delete'
-            )[length].split(' ')
-            MyActions.home.available_actions = [MyActions.actions[arg] for arg in args]
-            for action in MyActions.actions.values():
-                action.setEnabled(action in MyActions.home.available_actions)
+    def connect(home: HomeW):
+        items = home.list_widget.selectedItems()
+        if not home.enter_explorer:
+            return
+        elif not items:
+            args = 'paste mkdir'
+        elif len(items) == 1:
+            args = f'{"open " if items[0].foreground() == QColor("white") else ""}cut copy delete rename'
+        else:
+            args = 'cut copy delete'
+
+        home.available_actions = [MyActions.actions[arg] for arg in args.split()]
+        for k, action in MyActions.actions.items():
+            is_available = action in home.available_actions
+            action.setEnabled(is_available and MyActions.paste_mode is not None if k == 'paste' else is_available)
+
+    @staticmethod
+    def internal_clip(paste_mode):
+        MyActions.set_paste(paste_mode, [internal + file for file in home_w.selected_texts()])
+
+    @staticmethod
+    def set_paste(paste_mode: str | None, internal_clipboard: List[str]):
+        MyActions.paste_mode = paste_mode
+        MyActions.internal_clipboard = internal_clipboard
 
     @staticmethod
     def open():
-        MyActions.home.cd(None, MyActions.home.selected_texts()[0])
-
-    @staticmethod
-    def set_clipboard(is_cut: bool):
-        MyActions.is_cut = is_cut
-        MyActions.tmp_clipboard = [G.valid_internal(it) for it in MyActions.home.selected_texts()]
-        QApplication.clipboard().setText('\n'.join(MyActions.tmp_clipboard))
+        home_w.cd(None, home_w.selected_texts()[0])
 
     @staticmethod
     def delete():
         yes_btn = QMessageBox.StandardButton.Yes
         no_btn = QMessageBox.StandardButton.No
-        if yes_btn == QMessageBox.warning(MyActions.home, '刪除檔案', '你確定要永久刪除這些檔案嗎？', yes_btn | no_btn):
-            G.device.sh(' && '.join(f'rm -rf "/sdcard/{G.internal}/{file}"' for file in MyActions.home.selected_texts()))
-            MyActions.home.cd(None, '')
+        if yes_btn == QMessageBox.warning(home_w, '刪除檔案', '你確定要永久刪除這些檔案嗎？', yes_btn | no_btn):
+            device.sh(' && '.join(f'rm -rf "/sdcard{internal}{file}"' for file in home_w.selected_texts()))
+            home_w.cd(None, '')
 
     @staticmethod
     def rename():
-        item = MyActions.home.list_widget.currentItem()
+        item = home_w.list_widget.currentItem()
         original_name = item.text()
-        MyActions.home.list_widget.editItem(item)
+        home_w.list_widget.editItem(item)
 
-        def run(_):
-            G.device.sh(f'cd "/sdcard/{G.internal}" && mv "{original_name}" "{item.text()}"')
-            MyActions.home.list_widget.itemDelegate().closeEditor.disconnect()
-            MyActions.home.cd(None, '')
+        def slot(_):
+            device.sh(f'cd "/sdcard{internal}" && mv "{original_name}" "{item.text()}"')
+            home_w.list_widget.itemDelegate().closeEditor.disconnect()
+            home_w.cd(None, '')
 
-        MyActions.home.list_widget.itemDelegate().closeEditor.connect(run)
+        home_w.list_widget.itemDelegate().closeEditor.connect(slot)
 
     @staticmethod
     def paste():
-        ...
+        if MyActions.paste_mode == 'cut':
+            device.sh(' && '.join(f'mv "/sdcard/{file}" "/sdcard/{internal}"' for file in MyActions.internal_clipboard))
+            home_w.cd(None, '')
+        else:
+            TransferD.set(MyActions.paste_mode, MyActions.internal_clipboard)
+            TransferD.new()
 
     @staticmethod
     def mkdir():
         item = QListWidgetItem()
         item.setBackground(QColor('#765341'))
         item.setForeground(QColor('white'))
-        MyActions.home.list_widget.addItem(item)
-        MyActions.home.list_widget.editItem(item)
+        home_w.list_widget.addItem(item)
+        home_w.list_widget.editItem(item)
 
-        def run(_):
-            G.device.sh(f'cd "/sdcard/{G.internal}";mkdir "{item.text()}"')
-            MyActions.home.cd(None, '')
+        def slot(_):
+            device.sh(f'cd "/sdcard/{internal}" && mkdir "{item.text()}"')
+            home_w.list_widget.itemDelegate().closeEditor.disconnect()
+            home_w.cd(None, '')
 
-        MyActions.home.list_widget.itemDelegate().closeEditor.connect(run)
+        home_w.list_widget.itemDelegate().closeEditor.connect(slot)
 
 
-class G:
-    device: MyAdbDevice | None = None
-    transferring = False
-    internal = ''
-    transfer_w: TransferD | None = None
-    home_w: HomeW | None = None
-
+class U:
     @staticmethod
     def delim(path: str) -> str:
         return re.sub('/+', '/', path.replace('\\', '/'))
-
-    @staticmethod
-    def valid_internal(branch: str) -> str:
-        return f'{G.internal}/{branch}'.lstrip('/')
 
     @staticmethod
     def sha256(string: str) -> str:
@@ -440,8 +489,11 @@ class G:
         return f'{round(length) if is_round else length}{("B", "KB", "MB", "GB")[i]}'
 
     @staticmethod
-    def are_local_files(a0) -> bool:
-        return all(url.isLocalFile() for url in a0.mimeData().urls())
+    def are_local_files(mime_datable) -> bool:
+        urls = mime_datable.mimeData().urls()
+        if not urls:
+            return False
+        return all(url.isLocalFile() for url in urls)
 
     @staticmethod
     def push_dir_essentials(m_src: str, m_dst: str) -> Tuple[str, List[str], List[str]]:
@@ -452,14 +504,16 @@ class G:
         dsts = []
         for r, ds, fs in os.walk(m_src):
             if not ds:
-                end_dirs += f' "{G.delim(op.relpath(r, path_parent))}"'
+                end_dirs += f' "{U.delim(op.relpath(r, path_parent))}"'
             for f in fs:
                 srcs.append(op.join(r, f))
-                dsts.append(G.delim(op.join(m_dst, f)))
+                dsts.append(U.delim(op.join(m_dst, f)))
         return end_dirs, srcs, dsts
 
 
 app = QApplication(sys.argv)
-G.home_w = HomeW()
-G.home_w.show()
+clipboard = QApplication.clipboard()
+transfer_w: TransferD
+home_w = HomeW()
+home_w.show()
 sys.exit(app.exec())
