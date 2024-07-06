@@ -95,7 +95,7 @@ class HomeW(QMainWindow):
 		self.enter_explorer = False
 		self.available_actions = []
 		self.navi_comp_ds: List[str] = []
-		self.navi_comp_prepwd = ''
+		self.navi_comp_prepwd: str | None = None
 
 		self.menu_bar = self.menuBar().addMenu('File')
 		MyActions.init(self)
@@ -105,7 +105,7 @@ class HomeW(QMainWindow):
 		self.back_btn.setFixedWidth(self.back_btn.height())
 		self.list_widget = MyListWidget(self, itemDoubleClicked=lambda item: self.cd(None, item.text()))
 		self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-		self.list_widget.addItem('Double click me to enter explorer')
+		self.list_widget.addItem('Enter explorer')
 		self.list_widget.itemSelectionChanged.connect(lambda: MyActions.connect(self))
 		self.navigator = MyLineEdit(self, textChanged=self.navi_comp_slot, editingFinished=lambda: self.cd(self.navigator.text(), ''))
 		self.navi_comp = QCompleter(self)
@@ -134,7 +134,7 @@ class HomeW(QMainWindow):
 		self.thread = Worker(self)
 		self.thread.run = self.waiting_for_launch
 		self.thread.sig.connect(lambda: self.label.setText(device.prop.name))
-		self.thread.sig2.connect(TransferD.new)
+		self.thread.sig2.connect(TransferW.new)
 		self.thread.start()
 
 	def waiting_for_launch(self):
@@ -152,7 +152,7 @@ class HomeW(QMainWindow):
 				transferring = True
 				device.runas('touch ./files/key_a')
 				srcs = sr.output.splitlines()
-				TransferD.set('pull', srcs)
+				TransferW.set('pull', srcs)
 				self.thread.sig2.emit()
 
 	def navi_comp_slot(self, text: str):
@@ -182,6 +182,7 @@ class HomeW(QMainWindow):
 			self.enter_explorer = True
 			branch = ''
 
+		new_internal = U.delim(new_internal)
 		sr = device.sh(f'cd "/sdcard{new_internal}{branch}" && pwd')
 		if sr.output.startswith('/sdcard') and sr.succeed:
 			internal = '/' + U.delim(re.sub('^/sdcard/*', '', sr.output))
@@ -197,6 +198,7 @@ class HomeW(QMainWindow):
 				item.setBackground(QColor('#765341'))
 				item.setForeground(QColor('white'))
 
+		self.navi_comp_prepwd = None
 		self.navigator.setText(internal)
 
 	def selected_texts(self) -> List[str]:
@@ -213,8 +215,8 @@ class HomeW(QMainWindow):
 			event.acceptProposedAction()
 
 	def dropEvent(self, event):
-		TransferD.set('push', [url.toLocalFile() for url in event.mimeData().urls()])
-		TransferD.new()
+		TransferW.set('push', [url.toLocalFile() for url in event.mimeData().urls()])
+		TransferW.new()
 		event.acceptProposedAction()
 
 	def closeEvent(self, event):
@@ -223,7 +225,7 @@ class HomeW(QMainWindow):
 		event.accept()
 
 
-class TransferD(QDialog):
+class TransferW(QDialog):
 	srcs: List[str]
 	dsts: List[str]
 	is_files: List[str]
@@ -234,33 +236,33 @@ class TransferD(QDialog):
 
 	@staticmethod
 	def set(mode: str, srcs: List[str]):
-		TransferD.mode = mode
+		TransferW.mode = mode
 		if mode == 'pull':
-			TransferD.total_size = int(srcs.pop(0))
-			TransferD.srcs = [src.split('\t')[0] for src in srcs]
-			TransferD.is_files = [src.split('\t')[1] == '1' for src in srcs]
-			TransferD.dsts = [U.safe_path(op.basename(a), b, op.exists) for a, b in zip(TransferD.srcs, TransferD.is_files)]
-			TransferD.get_size = U.local_size
-			TransferD.get_exists = op.exists
+			TransferW.total_size = int(srcs.pop(0))
+			TransferW.srcs = [src.split('\t')[0] for src in srcs]
+			TransferW.is_files = [src.split('\t')[1] == '1' for src in srcs]
+			TransferW.dsts = [U.safe_path(op.basename(a), b, op.exists) for a, b in zip(TransferW.srcs, TransferW.is_files)]
+			TransferW.get_size = U.local_size
+			TransferW.get_exists = op.exists
 		elif mode == 'push':
-			TransferD.total_size = sum(U.local_size(src) for src in srcs)
-			TransferD.srcs = srcs
-			TransferD.is_files = [op.isfile(src) for src in srcs]
-			TransferD.dsts = [U.safe_path(f'/sdcard{internal}{op.basename(src)}', op.isdir(src), device.exists) for src in srcs]
-			TransferD.get_size = device.get_remote_size
-			TransferD.get_exists = device.exists
+			TransferW.total_size = sum(U.local_size(src) for src in srcs)
+			TransferW.srcs = srcs
+			TransferW.is_files = [op.isfile(src) for src in srcs]
+			TransferW.dsts = [U.safe_path(f'/sdcard{internal}{op.basename(src)}', op.isdir(src), device.exists) for src in srcs]
+			TransferW.get_size = device.get_remote_size
+			TransferW.get_exists = device.exists
 		else:
-			TransferD.total_size = sum(device.get_remote_size(f'/sdcard{src}') for src in srcs)
-			TransferD.srcs = srcs
-			TransferD.is_files = []
-			TransferD.dsts = [f'/sdcard{internal}{op.basename(src)}' for src in srcs]
-			TransferD.get_size = device.get_remote_size
-			TransferD.get_exists = device.exists
+			TransferW.total_size = sum(device.get_remote_size(f'/sdcard{src}') for src in srcs)
+			TransferW.srcs = srcs
+			TransferW.is_files = []
+			TransferW.dsts = [f'/sdcard{internal}{op.basename(src)}' for src in srcs]
+			TransferW.get_size = device.get_remote_size
+			TransferW.get_exists = device.exists
 
 	@staticmethod
 	def new():
 		global transfer_w
-		transfer_w = TransferD(home_w)
+		transfer_w = TransferW(home_w)
 		transfer_w.setModal(True)
 		transfer_w.show()
 
@@ -288,55 +290,70 @@ class TransferD(QDialog):
 
 		super().show()
 
+	def close(self):
+		if TransferW.mode != 'pull' and home_w.enter_explorer:
+			home_w.cd(None, '')
+		super().close()
+
 	def compute(self):
 		try:
 			self.__value = 0
 			while self.__value < 100:
-				self.__count = sum(TransferD.get_exists(dst) for dst in TransferD.dsts) - 1
+				self.__count = sum(TransferW.get_exists(dst) for dst in TransferW.dsts) - 1
 				if self.__count == -1:
 					self.__count = 0
-				self.__size = sum(TransferD.get_size(dst) for dst in TransferD.dsts)
-				self.__value = self.__size * 100 // TransferD.total_size
+				self.__size = sum(TransferW.get_size(dst) for dst in TransferW.dsts)
+				self.__value = self.__size * 100 // TransferW.total_size
 				self.compute_t.sig.emit()
 
 		except ZeroDivisionError:
 			self.compute_t.sig.emit()
 
 	def update_ui(self):
-		now = time.time()
+		duration = time.time() - self.start_time
+		velocity = self.__size / duration
 		self.label.setText(
-			f'{self.__count}/{len(TransferD.dsts)} File{"s" if len(TransferD.dsts) > 1 else ""}  |  ' +
-			f'{round(now - self.start_time)}s  |  ' +
-			f'{U.human_readable_size(self.__size / (now - self.start_time), True)}/s  |  ' +
-			f'{U.human_readable_size(self.__size)}/{U.human_readable_size(TransferD.total_size)}')
+			f'{self.__count}/{len(TransferW.dsts)} File{"s" if len(TransferW.dsts) > 1 else ""}  |  ' +
+			f'{round(duration)}s / {round((TransferW.total_size - self.__size) / (velocity if velocity else 1))}s  |  ' +
+			f'{U.human_readable_size(velocity, True)}/s  |  ' +
+			f'{U.human_readable_size(self.__size)}/{U.human_readable_size(TransferW.total_size)}')
 		self.pbar.setValue(self.__value)
 		self.setWindowTitle(f'{self.__value}%')
 
 	def transfer(self):
-		if TransferD.mode == 'pull':
-			for src, dst in zip(TransferD.srcs, TransferD.dsts):
+		if TransferW.mode == 'pull':
+			for src, dst in zip(TransferW.srcs, TransferW.dsts):
 				device.sync.pull(src, dst)
 			device.runas('touch ./files/key_b')
-		elif TransferD.mode == 'push':
-			for m_src, m_dst, is_file in zip(TransferD.srcs, TransferD.dsts, TransferD.is_files):
+		elif TransferW.mode == 'push':
+			for m_src, m_dst, is_file in zip(TransferW.srcs, TransferW.dsts, TransferW.is_files):
 				if is_file:
 					device.sync.push(m_src, m_dst)
 				else:
-					end_dirs, srcs, dsts = U.push_dir_essentials(m_src, m_dst)
+					end_dirs, srcs, dsts = self.push_dir_essentials(m_src, m_dst)
 					device.sh(f'cd "/sdcard{internal}" && mkdir -p {end_dirs}')
 					for src, dst in zip(srcs, dsts):
 						device.sync.push(src, dst)
 		else:
-			device.sh(' && '.join(f'cp -r "/sdcard{src}" "/sdcard{internal}"' for src in TransferD.srcs))
+			device.sh(' && '.join(f'cp -r "/sdcard{src}" "/sdcard{internal}"' for src in TransferW.srcs))
 
 		time.sleep(1)
 		global transferring
 		transferring = False
 
-	def close(self):
-		if TransferD.mode != 'pull' and home_w.enter_explorer:
-			home_w.cd(None, '')
-		super().close()
+	def push_dir_essentials(self, m_src: str, m_dst: str) -> Tuple[str, List[str], List[str]]:
+		path_parent = op.dirname(m_src)
+
+		end_dirs = ''
+		srcs = []
+		dsts = []
+		for r, ds, fs in os.walk(m_src):
+			if not ds:
+				end_dirs += f' "{U.delim(op.relpath(r, path_parent))}"'
+			for f in fs:
+				srcs.append(op.join(r, f))
+				dsts.append(U.delim(op.join(m_dst, f)))
+		return end_dirs, srcs, dsts
 
 
 class MyActions:
@@ -425,8 +442,8 @@ class MyActions:
 			device.sh(' && '.join(f'mv "/sdcard/{file}" "/sdcard/{internal}"' for file in MyActions.internal_clipboard))
 			home_w.cd(None, '')
 		else:
-			TransferD.set(MyActions.paste_mode, MyActions.internal_clipboard)
-			TransferD.new()
+			TransferW.set(MyActions.paste_mode, MyActions.internal_clipboard)
+			TransferW.new()
 
 	@staticmethod
 	def mkdir():
@@ -495,25 +512,10 @@ class U:
 			return False
 		return all(url.isLocalFile() for url in urls)
 
-	@staticmethod
-	def push_dir_essentials(m_src: str, m_dst: str) -> Tuple[str, List[str], List[str]]:
-		path_parent = op.dirname(m_src)
-
-		end_dirs = ''
-		srcs = []
-		dsts = []
-		for r, ds, fs in os.walk(m_src):
-			if not ds:
-				end_dirs += f' "{U.delim(op.relpath(r, path_parent))}"'
-			for f in fs:
-				srcs.append(op.join(r, f))
-				dsts.append(U.delim(op.join(m_dst, f)))
-		return end_dirs, srcs, dsts
-
 
 app = QApplication(sys.argv)
 clipboard = QApplication.clipboard()
-transfer_w: TransferD
+transfer_w: TransferW
 home_w = HomeW()
 home_w.show()
 sys.exit(app.exec())
