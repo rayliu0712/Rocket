@@ -10,7 +10,7 @@ from typing import List, Callable, Tuple, Dict
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStringListModel
 from PyQt6.QtGui import QColor, QKeySequence, QAction
 from PyQt6.QtWidgets import QWidget, QCompleter, QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget, QLabel, QProgressBar, QMenu, QMainWindow, \
-	QMessageBox, QLineEdit, QDialog, QListWidgetItem, QCheckBox, QComboBox
+	QMessageBox, QLineEdit, QDialog, QListWidgetItem, QComboBox
 from adbutils import adb, AdbDevice, ShellReturn
 
 
@@ -79,7 +79,7 @@ class MyListWidget(QListWidget):
 		super().keyPressEvent(event)
 
 
-class DynamicModelLineEdit(QLineEdit):
+class Navigator(QLineEdit):
 	def focusOutEvent(self, event):
 		if not home_w.navigator_focus or not self.hasFocus():
 			super().focusOutEvent(event)
@@ -119,14 +119,12 @@ class HomeW(QMainWindow):
 		self.explorer.addItem('Enter explorer')
 		self.explorer.itemSelectionChanged.connect(lambda: MyActions.connect(self))
 
-		self.navigator = DynamicModelLineEdit(self, textChanged=self.navigator_slot, editingFinished=lambda: self.cd(self.navigator.text(), ''))
+		self.navigator = Navigator(self, textChanged=self.navigator_slot, editingFinished=lambda: self.cd(self.navigator.text(), ''))
 		self.navigator_model = QStringListModel()
 		self.navigator.setCompleter(QCompleter(self.navigator_model))
 
-		self.finder = DynamicModelLineEdit(self)
+		self.finder = QLineEdit(self)
 		self.finder.setPlaceholderText('Search')
-		self.finder_model = QStringListModel()
-		self.finder.setCompleter(QCompleter(self.finder_model))
 		self.filetype_combo = QComboBox(self)
 		self.filetype_combo.addItems(['All', 'Dirs', 'Files'])
 		self.parser_combo = QComboBox(self)
@@ -389,7 +387,7 @@ class TransferW(QDialog):
 					for src, dst in zip(srcs, dsts):
 						device.sync.push(src, dst)
 		else:
-			device.sh(';'.join(f'cp -r "{src}" "/sdcard{internal}"' for src in TransferW.srcs))
+			device.sh(' && '.join(f'cp -r "{src}" "/sdcard{internal}"' for src in TransferW.srcs))
 
 		time.sleep(1)
 		global transferring
@@ -507,7 +505,7 @@ class MyActions:
 	@staticmethod
 	def paste():
 		if MyActions.paste_mode == 'cut':
-			device.sh(';'.join(f'mv "/sdcard/{file}" "/sdcard/{internal}"' for file in MyActions.internal_clipboard))
+			device.sh(' && '.join(f'mv "/sdcard/{file}" "/sdcard/{internal}"' for file in MyActions.internal_clipboard))
 			home_w.cd(None, '')
 		else:
 			msgbox = U.calculating_size_msgbox()
