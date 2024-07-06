@@ -466,7 +466,7 @@ class MyActions:
 	@staticmethod
 	def set_paste(paste_mode: str | None, internal_clipboard: List[str]):
 		MyActions.paste_mode = paste_mode
-		MyActions.internal_clipboard = internal_clipboard
+		MyActions.internal_clipboard = ['/sdcard' + file for file in internal_clipboard] if paste_mode == 'copy' else internal_clipboard
 
 	@staticmethod
 	def open():
@@ -511,7 +511,7 @@ class MyActions:
 			home_w.cd(None, '')
 		else:
 			msgbox = U.calculating_size_msgbox()
-			TransferW.set(MyActions.paste_mode, ['/sdcard' + file for file in MyActions.internal_clipboard])
+			TransferW.set(MyActions.paste_mode, MyActions.internal_clipboard)
 			msgbox.close()
 			TransferW.new()
 
