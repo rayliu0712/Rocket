@@ -17,7 +17,7 @@
 
 You can customize bookmarks by editing `bookmarks` variable in `Rocket.pyw` at line 48 (between `MyAdbDevice` class and `Worker` class)
 
-The Syntax is `'title':'path',`, the path uses `/sdcard` as root. All paths should both starts and end with `/`
+The Syntax is `'title':'path',`, the path uses `/sdcard` as root. All paths should start and end with `/`
 
 If you don't want any bookmark, set bookmarks to empty dictionary (`bookmarks = {}`)
 
