@@ -49,7 +49,7 @@ bookmarks = {
 	'Home': '/',
 	'Download': '/Download/',
 	'Pictures': '/Pictures/',
-	'AstroDX': '/Android/data/com.Reflektone.AstroDX/files/levels/'
+	'AstroDX': '/Android/data/com.Reflektone.AstroDX/files/levels/',
 }
 device: MyAdbDevice | None = None
 internal = '/'
